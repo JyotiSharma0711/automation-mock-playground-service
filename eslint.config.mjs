@@ -72,6 +72,7 @@ export default [
                     allowedFiles: [
                         '**/res-utils.ts',
                         '**/res-utils.js',
+                        '**/server.ts',
                         '**/*.test.ts',
                         '**/*.test.js',
                         '**/*.spec.ts',

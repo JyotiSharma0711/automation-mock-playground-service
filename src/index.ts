@@ -1,10 +1,16 @@
 import validateEnv from './env';
 import { InitMainContainer } from './container/implementations/main';
 import config from './config/server-config';
+import { startMemoryProfiling } from './utils/memory-profiler';
 
 // Initialize environment and container FIRST, before any imports that use them
 validateEnv();
 InitMainContainer();
+
+// Start memory profiling (logs every 60 s, adjustable via MEMORY_PROFILER_INTERVAL_MS)
+startMemoryProfiling(
+    parseInt(process.env.MEMORY_PROFILER_INTERVAL_MS || '60000')
+);
 
 // Now safe to import server which imports routes
 import createServer from './server';
