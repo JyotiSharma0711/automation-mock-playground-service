@@ -57,6 +57,12 @@ export function createGeneratePayloadJobHandler(
             txnMockData.user_inputs = data.inputs as
                 | Record<string, unknown>
                 | undefined;
+
+            if (data.flowContext.apiSessionCache.npType === 'BAP') {
+                txnMockData.bap_url = data.flowContext.subscriberUrl;
+            } else {
+                txnMockData.bpp_url = data.flowContext.subscriberUrl;
+            }
             const genOutput = await mockRunner.runGeneratePayloadWithSession(
                 data.actionMeta.actionId,
                 txnMockData
