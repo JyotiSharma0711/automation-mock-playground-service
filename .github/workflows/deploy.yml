@@ -4,6 +4,8 @@ on:
     push:
         branches:
             - main
+            - release
+            - release/**
 
 env:
     REGISTRY: ghcr.io
@@ -80,9 +82,10 @@ jobs:
                   cache-from: type=gha
                   cache-to: type=gha,mode=max
 
-    deploy:
+    deploy-main:
         runs-on: ubuntu-latest
         needs: build-and-push
+        if: github.ref == 'refs/heads/main'
         environment: dev
 
         steps:
@@ -161,3 +164,93 @@ jobs:
               if: failure()
               run: |
                   echo "🚨 Deployment failed! Check the logs above for details."
+
+    deploy-release:
+        runs-on: ubuntu-latest
+        needs: build-and-push
+        if: startsWith(github.ref, 'refs/heads/release')
+        environment: staging
+        env:
+            BASE_URL: https://workbench.ondc.tech/mock/playground
+            API_SERVICE_URL: https://workbench.ondc.tech/api-service
+            CONFIG_SERVICE_URL: https://workbench.ondc.tech/config-service
+            SERVICE_NAME: ondc-playground-mock-staging
+            PORT: 3200
+            REDIS_PORT: 6380
+            REDIS_DB_0: "0"
+            REDIS_DB_1: "1"
+
+        steps:
+            - name: Deploy release to EC2
+              uses: appleboy/ssh-action@v1.0.3
+              with:
+                  host: ${{ secrets.EC2_HOST_FIS }}
+                  username: ${{ secrets.EC2_USER_FIS }}
+                  key: ${{ secrets.EC2_SSH_KEY_FIS }}
+                  port: ${{ secrets.EC2_SSH_PORT || 22 }}
+                  script: |
+                      # Pull release image tag from GHCR (convert to lowercase)
+                      RELEASE_TAG=$(echo "${{ github.ref_name }}" | tr '[:upper:]' '[:lower:]' | tr '/' '-')
+                      IMAGE_NAME_LOWER=$(echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${RELEASE_TAG}" | tr '[:upper:]' '[:lower:]')
+                      docker pull $IMAGE_NAME_LOWER
+
+                      # Stop and remove old staging container if exists
+                      docker stop ondc-mock-service-staging 2>/dev/null || true
+                      docker rm ondc-mock-service-staging 2>/dev/null || true
+
+                      # Run staging container from GHCR image
+                      docker run -d \
+                        --name ondc-mock-service-staging \
+                        --restart unless-stopped \
+                        -p ${{ env.PORT }}:${{ env.PORT }} \
+                        -e NODE_ENV=${{ vars.NODE_ENV }} \
+                        -e PORT=${{ env.PORT }} \
+                        -e LOG_LEVEL=${{ vars.LOG_LEVEL }} \
+                        -e API_SERVICE_URL=${{ env.API_SERVICE_URL }} \
+                        -e CONFIG_SERVICE_URL=${{ env.CONFIG_SERVICE_URL }} \
+                        -e REDIS_HOST=${{ vars.REDIS_HOST }} \
+                        -e REDIS_PORT=${{ env.REDIS_PORT }} \
+                        -e REDIS_USERNAME=${{ vars.REDIS_USERNAME }} \
+                        -e REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }} \
+                        -e REDIS_DB_0=${{ env.REDIS_DB_0 }} \
+                        -e REDIS_DB_1=${{ env.REDIS_DB_1 }} \
+                        -e RABBITMQ_URL=${{ vars.RABBITMQ_URL }} \
+                        -e LOKI_HOST=${{ vars.LOKI_HOST }} \
+                        -e SERVICE_NAME=${{ env.SERVICE_NAME }} \
+                        -e BASE_URL=${{ env.BASE_URL }} \
+                        $IMAGE_NAME_LOWER
+
+                      # Clean up dangling images
+                      docker image prune -f
+
+            - name: Wait for service startup
+              run: sleep 30
+
+            - name: Health check
+              run: |
+                  HEALTH_URL="http://${{ secrets.EC2_HOST }}:${{ env.PORT }}/health"
+                  MAX_RETRIES=10
+                  RETRY_COUNT=0
+
+                  echo "Checking service health at $HEALTH_URL"
+
+                  while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+                    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" $HEALTH_URL || echo "000")
+
+                    if [ "$HTTP_CODE" = "200" ]; then
+                      echo "✅ Service is healthy (HTTP $HTTP_CODE)"
+                      exit 0
+                    fi
+
+                    RETRY_COUNT=$((RETRY_COUNT + 1))
+                    echo "⏳ Attempt $RETRY_COUNT/$MAX_RETRIES - HTTP $HTTP_CODE - Retrying in 10s..."
+                    sleep 10
+                  done
+
+                  echo "❌ Health check failed after $MAX_RETRIES attempts"
+                  exit 1
+
+            - name: Notify on failure
+              if: failure()
+              run: |
+                  echo "🚨 Release deployment failed! Check the logs above for details."
