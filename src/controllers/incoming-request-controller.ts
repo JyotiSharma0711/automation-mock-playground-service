@@ -167,17 +167,27 @@ async function processMatchingRequest(
             ctx.apiSessionCache.usecaseId,
             ctx.transactionData.sessionId
         );
-        const validationResult = (
-            await mockRunner.runValidatePayloadWithSession(
-                step.actionId,
-                body,
-                mockSessionData
-            )
-        ).result as {
+        const validationData = await mockRunner.runValidatePayloadWithSession(
+            step.actionId,
+            body,
+            mockSessionData
+        );
+
+        if (validationData.error) {
+            logger.error(
+                'validation function failled',
+                getLoggerData(req),
+                validationData.error
+            );
+            throw new Error('Validation function failed');
+        }
+
+        const validationResult = validationData.result as {
             valid: boolean;
             code?: string;
             description?: string;
         };
+
         if (!validationResult.valid) {
             logger.error(
                 `Payload validation failed for action ${step.actionId}: ${validationResult.code} - ${validationResult.description}`,
