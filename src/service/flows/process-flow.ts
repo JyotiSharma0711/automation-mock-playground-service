@@ -74,14 +74,6 @@ export async function actOnFlowService(
         };
     }
 
-    if (latestMeta.actionType === 'HTML_FORM') {
-        return {
-            success: false,
-            message:
-                'FORM based actions are not supported, in playground mock service',
-        };
-    }
-
     if (
         latestMeta.status === 'RESPONDING' ||
         latestMeta.status === 'INPUT-REQUIRED' ||
@@ -94,8 +86,8 @@ export async function actOnFlowService(
                 params.subscriberUrl,
                 'WORKING'
             );
-
-        if (latestMeta.actionType === 'DYNAMIC_FORM') {
+        const formTypes = ['HTML_FORM', 'DYNAMIC_FORM', 'HTML_FORM_MULTI'];
+        if (formTypes.includes(latestMeta.actionType)) {
             if (
                 !params.inputs ||
                 (params.inputs as Record<string, unknown>).submission_id ===
@@ -123,7 +115,7 @@ export async function actOnFlowService(
                 subscriberUrl: params.subscriberUrl,
                 transactionId: params.transactionId,
                 formActionId: latestMeta.actionId,
-                formType: 'DYNAMIC_FORM',
+                formType: latestMeta.actionType,
                 submissionId: submissionId,
             };
             const jobId = await queueService.enqueue(

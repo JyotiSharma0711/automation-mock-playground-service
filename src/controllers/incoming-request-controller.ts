@@ -20,6 +20,12 @@ import {
 } from '../service/jobs/api-service-request';
 import { sendAck } from '../utils/res-utils';
 import { getSaveDataConfig } from '../utils/runner-utils';
+import {
+    API_SERVICE_FORM_REQUEST_JOB,
+    ApiServiceFormRequestJobParams,
+} from '../service/jobs/api-service-form-request';
+import { resolveFormActions, validateFormHtml } from '../utils/form-utils';
+import axios from 'axios';
 
 export function incomingRequestControllers(
     workbenchCache: WorkbenchCacheServiceType,
@@ -82,7 +88,8 @@ export function incomingRequestControllers(
                     ctx,
                     queue,
                     mockRunnerCache,
-                    workbenchCache
+                    workbenchCache,
+                    flowStatusComplete.sequence
                 );
 
                 if (processRequest?.shouldRespond === true) {
@@ -145,7 +152,8 @@ async function processMatchingRequest(
     ctx: FlowContext,
     queue: IQueueService,
     mockRunnerCache: MockRunnerConfigCache,
-    workbenchCache: WorkbenchCacheServiceType
+    workbenchCache: WorkbenchCacheServiceType,
+    sequence: MappedStep[]
 ) {
     const { step, index } = matchingStep;
     logger.info(
@@ -221,6 +229,37 @@ async function processMatchingRequest(
             `Successfully saved incoming request for action ${step.actionId}`,
             getLoggerData(req)
         );
+
+        // Check if the next step in the sequence is an HTML_FORM
+        const nextStepIndex = index + 1;
+        if (nextStepIndex < sequence.length) {
+            const nextStep = sequence[nextStepIndex];
+            if (
+                nextStep.actionType === 'HTML_FORM' ||
+                nextStep.actionType === 'HTML_FORM_MULTI'
+            ) {
+                logger.info(
+                    `Next step ${nextStep.actionId} is ${nextStep.actionType}, processing form`,
+                    getLoggerData(req)
+                );
+                // Reload session so the form step sees the data just saved
+                const updatedSessionData = await workbenchCache
+                    .TxnBusinessCacheService()
+                    .getMockSessionData(
+                        ctx.transactionId,
+                        ctx.subscriberUrl,
+                        ctx.sessionId
+                    );
+                return processHtmlFormStep(
+                    nextStep,
+                    updatedSessionData,
+                    ctx,
+                    queue,
+                    workbenchCache
+                );
+            }
+        }
+
         return { shouldRespond: false };
     } catch (error) {
         logger.error(
@@ -275,4 +314,75 @@ async function handleValidationFailure(
         },
     };
     queue.enqueue(SEND_TO_API_SERVICE_JOB, data);
+}
+
+async function processHtmlFormStep(
+    nextStep: MappedStep,
+    mockSessionData: Record<string, unknown>,
+    ctx: FlowContext,
+    queue: IQueueService,
+    workbenchCache: WorkbenchCacheServiceType
+): Promise<{ shouldRespond: boolean }> {
+    try {
+        // The form URL is stored in session data under the form's action ID,
+        // written there by the upstream service before sending the API response.
+        const formLink = mockSessionData[nextStep.actionId] as
+            | string
+            | undefined;
+        if (!formLink) {
+            logger.warning(
+                `No form link found in session for step ${nextStep.actionId}`,
+                { transactionId: ctx.transactionId }
+            );
+            return { shouldRespond: false };
+        }
+
+        const formRaw = await axios.get<string>(formLink);
+        const fetchedHtml = formRaw.data;
+
+        const validation = validateFormHtml(fetchedHtml);
+        if (!validation.ok) {
+            logger.error(
+                `Form HTML validation failed for step ${nextStep.actionId}`,
+                { transactionId: ctx.transactionId, errors: validation.errors }
+            );
+            queue.enqueue(API_SERVICE_FORM_REQUEST_JOB, {
+                domain: ctx.domain,
+                version: ctx.version,
+                subscriberUrl: ctx.subscriberUrl,
+                transactionId: ctx.transactionId,
+                formActionId: nextStep.actionId,
+                formType: nextStep.actionType,
+                error: {
+                    code: 'FORM_VALIDATION_ERROR',
+                    message:
+                        validation.errors[0] ?? 'Form HTML validation failed',
+                },
+            } satisfies ApiServiceFormRequestJobParams);
+            return { shouldRespond: true };
+        }
+
+        // Validation passed: resolve relative form action URLs and save back
+        // to session so the form is ready when reference_data is consumed.
+        const resolvedHtml = resolveFormActions(formLink, fetchedHtml);
+        await workbenchCache
+            .TxnBusinessCacheService()
+            .overwriteMockSessionData(ctx.transactionId, ctx.subscriberUrl, {
+                ...mockSessionData,
+                [nextStep.actionId]: resolvedHtml,
+            });
+
+        logger.info(
+            `Form HTML fetched and saved for step ${nextStep.actionId}`,
+            { transactionId: ctx.transactionId }
+        );
+        return { shouldRespond: false };
+    } catch (error) {
+        logger.error(
+            `Error processing HTML form step ${nextStep.actionId}`,
+            { transactionId: ctx.transactionId },
+            error
+        );
+        return { shouldRespond: false };
+    }
 }

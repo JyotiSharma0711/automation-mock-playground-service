@@ -40,7 +40,7 @@ export function getReferenceData(
 ): Record<string, unknown> {
     const referenceData: Record<string, unknown> = {};
     const formSteps = flow.sequence.filter(
-        step => step.type === 'DYNAMIC_FORM'
+        step => step.type === 'DYNAMIC_FORM' || step.type === 'HTML_FORM'
     );
     formSteps.forEach(step => {
         const stepKey = step.key;
