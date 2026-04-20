@@ -73,7 +73,7 @@ export const handleFormSubmitService = async (
     }
     const submissionID = randomUUID();
     formData.form_submission_id = submissionID;
-    if (stepConfig.api === 'dynamic_form') {
+    if (stepConfig.api === 'dynamic_form' || stepConfig.api === 'html_form') {
         // proceed function
         await workbenchCache
             .NpSessionalCacheService()
