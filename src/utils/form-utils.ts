@@ -1,3 +1,198 @@
+import * as cheerio from 'cheerio';
+import logger from '@ondc/automation-logger';
+
+/**
+ * Resolves <form action> URLs in an HTML string against a base URL.
+ * Absolute http(s) and protocol-relative URLs are left unchanged.
+ * Empty, "#", or "javascript:*" actions are replaced with the base URL (no fragment).
+ * All other relative actions are resolved with new URL(action, baseUrl).
+ */
+export function resolveFormActions(baseUrl: string, html: string): string {
+    let base: URL;
+    try {
+        base = new URL(baseUrl);
+        if (!/^https?:$/i.test(base.protocol)) {
+            throw new Error('Base URL must be http(s)');
+        }
+    } catch {
+        throw new Error(`Invalid baseUrl: ${baseUrl}`);
+    }
+
+    const $ = cheerio.load(html);
+
+    const isAbsoluteHttp = (u: string) => /^https?:\/\//i.test(u);
+    const isProtocolRelative = (u: string) => /^\/\//.test(u);
+    const isBad = (u: string) =>
+        /^\s*javascript\s*:/i.test(u) || u.trim() === '' || u.trim() === '#';
+
+    $('form').each((_, element) => {
+        const $form = $(element);
+        const raw = ($form.attr('action') || '').trim();
+
+        if (isAbsoluteHttp(raw) || isProtocolRelative(raw)) return;
+
+        let resolved: string;
+        if (isBad(raw)) {
+            const cleanBase = new URL(base.toString());
+            cleanBase.hash = '';
+            resolved = cleanBase.toString();
+        } else {
+            resolved = new URL(raw, base).toString();
+        }
+        $form.attr('action', resolved);
+    });
+
+    return $.html();
+}
+
+type FieldInfo = {
+    name: string;
+    id?: string;
+    type: string;
+    hidden: boolean;
+};
+
+type ValidationResult = {
+    ok: boolean;
+    errors: string[];
+    warnings: string[];
+    details?: {
+        action: string;
+        method: 'GET' | 'POST';
+        fields: FieldInfo[];
+        hasSubmitControl: boolean;
+    };
+};
+
+export function validateFormHtml(html: string): ValidationResult {
+    try {
+        const $ = cheerio.load(html);
+        const errors: string[] = [];
+        const warnings: string[] = [];
+
+        // Forbid obvious active content
+        const forbiddenTags = ['iframe', 'object', 'embed'];
+        for (const tag of forbiddenTags) {
+            if ($(tag).length > 0) {
+                errors.push(`Forbidden tag present: <${tag}>`);
+            }
+        }
+
+        // Forbid inline event handlers (onclick, onload, etc.)
+        $('*').each((_, element) => {
+            const $el = $(element);
+            const attrs = $el.attr();
+            if (attrs) {
+                for (const attr of Object.keys(attrs)) {
+                    if (attr.toLowerCase().startsWith('on')) {
+                        errors.push(
+                            `Inline event handler "${attr}" found on <${$el.prop('tagName')?.toLowerCase() || 'unknown'}>`
+                        );
+                    }
+                }
+            }
+        });
+
+        // Forbid javascript: in href/src/action
+        const urlAttrs = ['href', 'src', 'action'];
+        $('*').each((_, element) => {
+            const $el = $(element);
+            for (const attr of urlAttrs) {
+                const val = $el.attr(attr);
+                if (val && /^\s*javascript\s*:/i.test(val)) {
+                    errors.push(
+                        `javascript: URL found in ${attr} on <${$el.prop('tagName')?.toLowerCase() || 'unknown'}>`
+                    );
+                }
+            }
+        });
+
+        // Form checks
+        const $forms = $('form');
+        if ($forms.length === 0) {
+            errors.push('No <form> element found.');
+            return { ok: false, errors, warnings };
+        }
+        if ($forms.length > 1) {
+            errors.push(
+                'Multiple <form> elements found (expected exactly one).'
+            );
+        }
+
+        const $form = $forms.first();
+        const action = ($form.attr('action') || '').trim();
+        const methodRaw = ($form.attr('method') || 'GET').toUpperCase();
+        const method = (methodRaw === 'POST' ? 'POST' : 'GET') as
+            | 'GET'
+            | 'POST';
+        if (methodRaw !== 'GET' && methodRaw !== 'POST') {
+            warnings.push(
+                `Unsupported form method "${methodRaw}" (treating as ${method}).`
+            );
+        }
+
+        const inputLikeSel = 'input, select, textarea, button';
+        const $inputs = $form.find(inputLikeSel);
+        const fields: FieldInfo[] = [];
+        $inputs.each((_, element) => {
+            const $el = $(element);
+            const tag = $el.prop('tagName')?.toLowerCase() || '';
+            const type = (
+                $el.attr('type') || (tag === 'textarea' ? 'textarea' : tag)
+            ).toLowerCase();
+            const name = $el.attr('name') || '';
+            const id = $el.attr('id') || undefined;
+            const hidden = type === 'hidden';
+            if (name) {
+                fields.push({ name, id, type, hidden });
+            }
+        });
+
+        let hasSubmitControl = false;
+        $inputs.each((_, element) => {
+            const $el = $(element);
+            const tag = $el.prop('tagName')?.toLowerCase() || '';
+            const type = ($el.attr('type') || '').toLowerCase();
+            const isSubmit =
+                tag === 'button'
+                    ? ($el.attr('type') || 'submit').toLowerCase() === 'submit'
+                    : type === 'submit';
+            if (isSubmit) {
+                hasSubmitControl = true;
+            }
+        });
+
+        if (!hasSubmitControl) {
+            warnings.push('No visible submit control found.');
+        }
+
+        const suspiciousHiddenNames = ['redirect', 'callback', 'token', 'url'];
+        const hiddenWarnings = fields
+            .filter(f => f.hidden)
+            .filter(f =>
+                suspiciousHiddenNames.some(kw =>
+                    f.name.toLowerCase().includes(kw)
+                )
+            );
+        if (hiddenWarnings.length > 0) {
+            warnings.push(
+                `Suspicious hidden fields: ${hiddenWarnings.map(f => f.name).join(', ')}`
+            );
+        }
+
+        const ok = errors.length === 0;
+        return {
+            ok,
+            errors,
+            warnings,
+            details: { action, method, fields, hasSubmitControl },
+        };
+    } catch (error) {
+        logger.error('Error validating form', {}, error);
+        return { ok: false, errors: ['failed to validate form'], warnings: [] };
+    }
+}
+
 export function getBeautifulForm(rawFormHtml: string) {
     // Extract the form element from raw HTML
     const formMatch = rawFormHtml.match(/<form[\s\S]*?<\/form>/i);

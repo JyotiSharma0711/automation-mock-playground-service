@@ -73,7 +73,7 @@ export const handleFormSubmitService = async (
     }
     const submissionID = randomUUID();
     formData.form_submission_id = submissionID;
-    if (stepConfig.api === 'dynamic_form') {
+    if (stepConfig.api === 'dynamic_form' || stepConfig.api === 'html_form') {
         // proceed function
         await workbenchCache
             .NpSessionalCacheService()
@@ -110,7 +110,15 @@ export const handleFormSubmitService = async (
             workbenchCache,
             queueService
         );
-
+        if (stepConfig.api === 'html_form') {
+            return {
+                dataType: 'json',
+                data: {
+                    success: true,
+                    submission_id: submissionID,
+                },
+            };
+        }
         const successHtml = getSuccessHtml(submissionID);
         // proceed function
         return {
