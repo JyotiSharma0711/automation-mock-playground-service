@@ -55,12 +55,14 @@ export const newFormControllers = (
                     data.session_id
                 );
                 const stepConfig = getConfigStep(runnerConfig, formId);
+                const acceptsHtml = req.accepts(['html', 'json']) === 'html';
                 const formResponse = await handleGetFormService(
                     stepConfig,
                     transactionData,
                     data,
                     formId,
-                    domain
+                    domain,
+                    acceptsHtml
                 );
                 if (formResponse.dataType === 'json') {
                     sendSuccess(res, formResponse.data);

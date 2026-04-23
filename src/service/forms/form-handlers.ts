@@ -10,131 +10,134 @@ import { IQueueService } from '../../queue/IQueueService';
 import { getBeautifulForm } from '../../utils/form-utils';
 
 export const handleGetFormService = async (
-    stepConfig: MockRunnerConfig['steps'][0],
-    transactionData: TransactionCache,
-    getFormQueryData: GetFormQuery,
-    formId: string,
-    domain: string
+  stepConfig: MockRunnerConfig['steps'][0],
+  transactionData: TransactionCache,
+  getFormQueryData: GetFormQuery,
+  formId: string,
+  domain: string,
+  acceptsHtml: boolean = false
 ) => {
-    if (stepConfig.api !== 'dynamic_form' && stepConfig.api != 'html_form') {
-        throw new Error('Invalid API type for form rendering');
+  if (stepConfig.api !== 'dynamic_form' && stepConfig.api != 'html_form') {
+    throw new Error('Invalid API type for form rendering');
+  }
+  if (stepConfig.api === 'dynamic_form') {
+    const formRenderUrl = `${process.env.BASE_URL}/forms/${domain}/${formId}?transaction_id=${getFormQueryData.transaction_id}&session_id=${getFormQueryData.session_id}&direct=true`;
+    // Return JSON only for programmatic API calls (e.g. axios).
+    // Browser navigation sends Accept: text/html → fall through to render HTML directly.
+    if (!getFormQueryData.direct && !acceptsHtml) {
+      return {
+        dataType: 'json',
+        data: {
+          success: true,
+          type: 'dynamic',
+          formUrl: formRenderUrl,
+          message:
+            'Please open the formUrl and submit the form to proceed with the flow',
+        },
+      };
     }
-    if (stepConfig.api === 'dynamic_form') {
-        const formRenderUrl = `${process.env.BASE_URL}/forms/${domain}/${formId}?transaction_id=${getFormQueryData.transaction_id}&session_id=${getFormQueryData.session_id}&direct=true`;
-        if (!getFormQueryData.direct) {
-            return {
-                dataType: 'json',
-                data: {
-                    success: true,
-                    type: 'dynamic',
-                    formUrl: formRenderUrl,
-                    message:
-                        'Please open the formUrl and submit the form to proceed with the flow',
-                },
-            };
-        }
-    }
+}
 
-    const submitUrl = `${process.env.BASE_URL}/forms/${domain}/${formId}/submit?transaction_id=${getFormQueryData.transaction_id}&session_id=${getFormQueryData.session_id}`;
-    const htmlContent = MockRunner.decodeBase64(stepConfig.mock.formHtml ?? '');
-    if (!htmlContent) {
-        throw new Error(
-            'Form HTML content not found in config for form: ' +
-                stepConfig.action_id
-        );
-    }
-    const submissionData = {
-        session_id: getFormQueryData.session_id,
-        transaction_id: getFormQueryData.transaction_id,
-        flow_id: transactionData.flowId,
-    };
-    const newContent = ejs.render(getBeautifulForm(htmlContent), {
-        actionUrl: submitUrl,
-        submissionData: JSON.stringify(submissionData),
-    });
-    return {
-        dataType: 'html',
-        data: newContent,
-    };
+  const submitUrl = `${process.env.BASE_URL}/forms/${domain}/${formId}/submit?transaction_id=${getFormQueryData.transaction_id}&session_id=${getFormQueryData.session_id}`;
+  const htmlContent = MockRunner.decodeBase64(stepConfig.mock.formHtml ?? '');
+  if (!htmlContent) {
+    throw new Error(
+      'Form HTML content not found in config for form: ' +
+      stepConfig.action_id
+    );
+  }
+  const submissionData = {
+    session_id: getFormQueryData.session_id,
+    transaction_id: getFormQueryData.transaction_id,
+    flow_id: transactionData.flowId,
+  };
+  const newContent = ejs.render(getBeautifulForm(htmlContent), {
+    actionUrl: submitUrl,
+    submissionData: JSON.stringify(submissionData),
+  });
+  return {
+    dataType: 'html',
+    data: newContent,
+  };
 };
 
 export const handleFormSubmitService = async (
-    stepConfig: MockRunnerConfig['steps'][0],
-    formData: Record<string, unknown>,
-    workbenchCache: WorkbenchCacheServiceType,
-    queryData: SubmitFormQuery,
-    formId: string,
-    sessionData: SessionCache,
-    transactionData: TransactionCache,
-    queueService: IQueueService
+  stepConfig: MockRunnerConfig['steps'][0],
+  formData: Record<string, unknown>,
+  workbenchCache: WorkbenchCacheServiceType,
+  queryData: SubmitFormQuery,
+  formId: string,
+  sessionData: SessionCache,
+  transactionData: TransactionCache,
+  queueService: IQueueService
 ) => {
-    if (stepConfig.api !== 'dynamic_form' && stepConfig.api != 'html_form') {
-        throw new Error('Invalid API type for form rendering');
+  if (stepConfig.api !== 'dynamic_form' && stepConfig.api != 'html_form') {
+    throw new Error('Invalid API type for form rendering');
+  }
+  const submissionID = randomUUID();
+  formData.form_submission_id = submissionID;
+  if (stepConfig.api === 'dynamic_form' || stepConfig.api === 'html_form') {
+    // proceed function
+    await workbenchCache
+      .NpSessionalCacheService()
+      .updateSessionWithFormSubmission(
+        queryData.session_id,
+        queryData.transaction_id,
+        submissionID,
+        formId
+      );
+    await workbenchCache
+      .TxnBusinessCacheService()
+      .addFormData(
+        queryData.transaction_id,
+        sessionData.subscriberUrl,
+        queryData.session_id,
+        formId,
+        formData
+      );
+    await actOnFlowService(
+      {
+        flow: sessionData.flowConfigs[transactionData.flowId],
+        flowId: transactionData.flowId,
+        transactionId: queryData.transaction_id,
+        sessionId: queryData.session_id,
+        subscriberUrl: sessionData.subscriberUrl,
+        apiSessionCache: sessionData,
+        transactionData: transactionData,
+        domain: sessionData.domain,
+        version: sessionData.version,
+        inputs: {
+          submission_id: submissionID,
+        },
+      },
+      workbenchCache,
+      queueService
+    );
+    if (stepConfig.api === 'html_form') {
+      return {
+        dataType: 'json',
+        data: {
+          success: true,
+          submission_id: submissionID,
+        },
+      };
     }
-    const submissionID = randomUUID();
-    formData.form_submission_id = submissionID;
-    if (stepConfig.api === 'dynamic_form' || stepConfig.api === 'html_form') {
-        // proceed function
-        await workbenchCache
-            .NpSessionalCacheService()
-            .updateSessionWithFormSubmission(
-                queryData.session_id,
-                queryData.transaction_id,
-                submissionID,
-                formId
-            );
-        await workbenchCache
-            .TxnBusinessCacheService()
-            .addFormData(
-                queryData.transaction_id,
-                sessionData.subscriberUrl,
-                queryData.session_id,
-                formId,
-                formData
-            );
-        await actOnFlowService(
-            {
-                flow: sessionData.flowConfigs[transactionData.flowId],
-                flowId: transactionData.flowId,
-                transactionId: queryData.transaction_id,
-                sessionId: queryData.session_id,
-                subscriberUrl: sessionData.subscriberUrl,
-                apiSessionCache: sessionData,
-                transactionData: transactionData,
-                domain: sessionData.domain,
-                version: sessionData.version,
-                inputs: {
-                    submission_id: submissionID,
-                },
-            },
-            workbenchCache,
-            queueService
-        );
-        if (stepConfig.api === 'html_form') {
-            return {
-                dataType: 'json',
-                data: {
-                    success: true,
-                    submission_id: submissionID,
-                },
-            };
-        }
-        const successHtml = getSuccessHtml(submissionID);
-        // proceed function
-        return {
-            dataType: 'html',
-            data: successHtml,
-        };
-    } else {
-        // proceed function
-        return {
-            dataType: 'json',
-            data: {
-                success: true,
-                submission_id: submissionID,
-            },
-        };
-    }
+    const successHtml = getSuccessHtml(submissionID);
+    // proceed function
+    return {
+      dataType: 'html',
+      data: successHtml,
+    };
+  } else {
+    // proceed function
+    return {
+      dataType: 'json',
+      data: {
+        success: true,
+        submission_id: submissionID,
+      },
+    };
+  }
 };
 
 const getSuccessHtml = (submissionID: string) => `
